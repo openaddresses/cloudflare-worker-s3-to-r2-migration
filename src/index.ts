@@ -45,7 +45,8 @@ export default {
             })
         }
 
-        if (config.index_file && s3objectName.endsWith("/")) {
+        console.log(`Config for ${hostName}: ${JSON.stringify(config)}`);
+        if (config.index_file && (s3objectName == "" || s3objectName.endsWith("/"))) {
             s3objectName += config.index_file;
         }
 
