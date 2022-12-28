@@ -1,13 +1,19 @@
 name = "s3-to-r2"
 compatibility_date = "2022-05-12"
 main = "./src/index.ts"
+routes = [
+    { pattern = "data.openaddresses.io/*", zone_id = "1589a7a76f5cb624e26d19b16c3143a1" },
+    { pattern = "results.openaddresses.io/*", zone_id = "1589a7a76f5cb624e26d19b16c3143a1" },
+    { pattern = "v2.openaddresses.io/*", zone_id = "1589a7a76f5cb624e26d19b16c3143a1" },
+]
 
 [vars]
-AWS_DEFAULT_REGION = "eu"
+AWS_DEFAULT_REGION = "us-east-1"
 AWS_SERVICE = "s3"
 AWS_S3_BUCKET_SCHEME = 'https:'
-AWS_S3_BUCKET = "example-s3-bucket.storage.googleapis.com"
+AWS_S3_BUCKET = "v2.openaddresses.io"
+R2_OBJECT_PREFIX = "v2.openaddresses.io"
 
 [[r2_buckets]]
 binding = 'R2'
-bucket_name = 's3-migration'
+bucket_name = 'openaddresses'
