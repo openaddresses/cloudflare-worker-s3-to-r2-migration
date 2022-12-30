@@ -14,6 +14,7 @@ interface Env {
 const hostToBucketMapping = {
     "v2.openaddresses.io": {
         "s3_bucket": "v2.openaddresses.io",
+        "block_root": true,
     },
     "results.openaddresses.io": {
         "s3_bucket": "results.openaddresses.io",
@@ -22,6 +23,7 @@ const hostToBucketMapping = {
     },
     "data.openaddresses.io": {
         "s3_bucket": "data.openaddresses.io",
+        "block_root": true,
     }
 }
 
@@ -45,9 +47,16 @@ export default {
             })
         }
 
-        console.log(`Config for ${hostName}: ${JSON.stringify(config)}`);
-        if (config.index_file && (s3objectName == "" || s3objectName.endsWith("/"))) {
-            s3objectName += config.index_file;
+        if (s3objectName == "" || s3objectName.endsWith("/")) {
+            if (config.block_root) {
+                return new Response(`Bad Request`, {
+                    status: 400
+                })
+            }
+
+            if (config.index_file && (s3objectName == "" || s3objectName.endsWith("/"))) {
+                s3objectName += config.index_file;
+            }
         }
 
         const r2prefix = config.s3_bucket + "/";
