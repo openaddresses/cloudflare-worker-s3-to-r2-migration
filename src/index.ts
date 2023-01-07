@@ -36,22 +36,35 @@ function objectNotFound(objectName: string): Response {
 const amzRedirectLocationHeaderName = "x-amz-website-redirect-location";
 export default {
     async fetch(request: Request, env: Env, ctx: EventContext<any, any, any>): Promise<Response> {
+        let cache = caches.default;
+        const cacheUrl = new URL(request.url);
+        const cacheKey = new Request(cacheUrl.toString(), request);
+        let overallCacheResponse = await cache.match(cacheKey);
+        if (overallCacheResponse) {
+            console.log("Cache matched");
+            return overallCacheResponse;
+        }
+
         const url = new URL(request.url)
         const hostName = url.hostname;
         let s3objectName = url.pathname.slice(1);
 
         const config = hostToBucketMapping[hostName];
         if (!config) {
-            return new Response(`Unknown host`, {
+            let resp = new Response(`Unknown host`, {
                 status: 404
-            })
+            });
+            ctx.waitUntil(cache.put(cacheKey, resp.clone()));
+            return resp;
         }
 
         if (s3objectName == "" || s3objectName.endsWith("/")) {
             if (config.block_root) {
-                return new Response(`Bad Request`, {
+                const resp = new Response(`Bad Request`, {
                     status: 400
-                })
+                });
+                ctx.waitUntil(cache.put(cacheKey, resp.clone()));
+                return resp;
             }
 
             if (config.index_file && (s3objectName == "" || s3objectName.endsWith("/"))) {
@@ -63,15 +76,19 @@ export default {
         const r2objectName =  r2prefix + s3objectName;
 
         if (r2objectName === '') {
-            return new Response(`Bad Request`, {
+            const resp = new Response(`Bad Request`, {
                 status: 400
-            })
+            });
+            ctx.waitUntil(cache.put(cacheKey, resp.clone()));
+            return resp;
         }
 
         if (request.method !== 'GET') {
-            return new Response(`Method Not Allowed`, {
+            const resp = new Response(`Method Not Allowed`, {
                 status: 405
-            })
+            });
+            ctx.waitUntil(cache.put(cacheKey, resp.clone()));
+            return resp;
         }
 
         const objHeadResp = await env.R2.head(r2objectName);
@@ -90,7 +107,11 @@ export default {
             const s3Object = await fetch(signedRequest);
 
             if (s3Object.status === 404) {
-                return objectNotFound(s3objectName)
+                const resp = new Response(`Object ${s3objectName} not found`, {
+                    status: 404,
+                });
+                ctx.waitUntil(cache.put(cacheKey, resp.clone()));
+                return resp;
             }
 
             let dataForR2, dataForResponse;
@@ -116,7 +137,9 @@ export default {
             }))
 
             if (redirectTo) {
-                return Response.redirect(redirectTo, 302);
+                const resp = Response.redirect(redirectTo, 302);
+                ctx.waitUntil(cache.put(cacheKey, resp.clone()));
+                return resp;
             }
 
             // Clone the response so that it's no longer immutable
@@ -125,11 +148,15 @@ export default {
                 newResponse.headers.set("cache-control", config.cache_control);
             }
 
+            ctx.waitUntil(cache.put(cacheKey, newResponse.clone()));
+
             return newResponse;
         }
 
         if (objHeadResp.customMetadata[amzRedirectLocationHeaderName]) {
-            return Response.redirect(objHeadResp.customMetadata[amzRedirectLocationHeaderName], 302);
+            const resp = Response.redirect(objHeadResp.customMetadata[amzRedirectLocationHeaderName], 302);
+            ctx.waitUntil(cache.put(cacheKey, resp.clone()));
+            return resp;
         }
 
         const obj = await env.R2.get(r2objectName);
@@ -140,8 +167,10 @@ export default {
             headers.set("cache-control", config.cache_control);
         }
         headers.set('etag', obj.httpEtag)
-        return new Response(obj.body, {
+        const resp = new Response(obj.body, {
             headers
         });
+        ctx.waitUntil(cache.put(cacheKey, resp.clone()));
+        return resp;
     }
 }
