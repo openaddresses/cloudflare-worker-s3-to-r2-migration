@@ -27,13 +27,8 @@ const hostToBucketMapping = {
     }
 }
 
-function objectNotFound(objectName: string): Response {
-    return new Response(`Object ${objectName} not found`, {
-        status: 404,
-    })
-}
-
 const amzRedirectLocationHeaderName = "x-amz-website-redirect-location";
+
 export default {
     async fetch(request: Request, env: Env, ctx: EventContext<any, any, any>): Promise<Response> {
         let cache = caches.default;
@@ -94,6 +89,8 @@ export default {
         const objHeadResp = await env.R2.head(r2objectName);
 
         if (objHeadResp === null) {
+            console.log(`Fetching from S3: s3://${config.s3_bucket}/${s3objectName}`);
+
             const aws = new AwsClient({
                 "accessKeyId": env.AWS_ACCESS_KEY_ID,
                 "secretAccessKey": env.AWS_SECRET_ACCESS_KEY,
@@ -131,6 +128,8 @@ export default {
                 dataForResponse = s3Body[1];
             }
 
+            console.log(`Saving to R2: ${r2objectName}`);
+
             ctx.waitUntil(env.R2.put(r2objectName, dataForR2, {
                 httpMetadata: s3Object.headers,
                 customMetadata: customMetadata,
@@ -158,6 +157,8 @@ export default {
             ctx.waitUntil(cache.put(cacheKey, resp.clone()));
             return resp;
         }
+
+        console.log(`Fetching from R2: ${r2objectName}`);
 
         const obj = await env.R2.get(r2objectName);
 
