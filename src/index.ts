@@ -135,6 +135,16 @@ export default {
             return resp;
         }
 
+        // Require a referer header for requests to data.openaddresses.io/runs
+        const referer = request.headers.get("referer");
+        if (hostName === "data.openaddresses.io" && s3objectName.startsWith("runs/") && !referer) {
+            const resp = new Response(`Invalid request`, {
+                status: 403
+            });
+            ctx.waitUntil(cache.put(cacheKey, resp.clone()));
+            return resp;
+        }
+
         const config = hostToBucketMapping[hostName];
         if (!config) {
             let resp = new Response(`Unknown host`, {
