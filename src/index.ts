@@ -106,8 +106,19 @@ export default {
         let s3objectName = url.pathname.slice(1);
         s3objectName = sanitizePath(s3objectName);
 
+        // Block requests with control characters or non-ASCII characters
         if (/[\x00-\x1F\x7F-\xFF]/.test(s3objectName) || /%[0-1][0-9A-Fa-f]/.test(s3objectName)) {
             const resp = new Response(`Invalid request`, { status: 400 });
+            ctx.waitUntil(cache.put(cacheKey, resp.clone()));
+            return resp;
+        }
+
+        // Require a referer header for requests to data.openaddresses.io/runs
+        const referer = request.headers.get("referer");
+        if (hostName === "data.openaddresses.io" && s3objectName.startsWith("runs/") && !referer) {
+            const resp = new Response(`Invalid request`, {
+                status: 403
+            });
             ctx.waitUntil(cache.put(cacheKey, resp.clone()));
             return resp;
         }
