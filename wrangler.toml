@@ -1,11 +1,16 @@
 name = "s3-to-r2"
 compatibility_date = "2022-05-12"
 main = "./src/index.ts"
+
 routes = [
     { pattern = "data.openaddresses.io/*", zone_id = "1589a7a76f5cb624e26d19b16c3143a1" },
     { pattern = "results.openaddresses.io/*", zone_id = "1589a7a76f5cb624e26d19b16c3143a1" },
     { pattern = "v2.openaddresses.io/*", zone_id = "1589a7a76f5cb624e26d19b16c3143a1" },
 ]
+
+[observability]
+enabled = true
+head_sampling_rate = 1 # optional. default = 1.
 
 [vars]
 AWS_DEFAULT_REGION = "us-east-1"
