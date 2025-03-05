@@ -3,6 +3,7 @@ import { AwsClient } from "aws4fetch";
 interface Env {
     R2: R2Bucket,
     R2_OBJECT_PREFIX: string,
+    OA_USAGE: KVNamespace,
     AWS_ACCESS_KEY_ID: string,
     AWS_SECRET_ACCESS_KEY: string,
     AWS_SERVICE: string,
@@ -10,6 +11,14 @@ interface Env {
     AWS_S3_BUCKET: string
     AWS_S3_BUCKET_SCHEME: string
 }
+
+interface UsageData {
+    usage: number;
+    timestamp: number;
+}
+
+const MAX_USAGE = 5 * 1024 * 1024 * 1024; // 5 GB
+const USAGE_WINDOW = 24 * 60 * 60 * 1000; // 24 hours
 
 const hostToBucketMapping = {
     "v2.openaddresses.io": {
@@ -29,6 +38,32 @@ const hostToBucketMapping = {
 
 const amzRedirectLocationHeaderName = "x-amz-website-redirect-location";
 
+async function getUsage(env: Env, ip: string): Promise<number> {
+    const usageData = await env.OA_USAGE.get(ip, { type: "json" }) as UsageData | null;
+    if (!usageData) {
+        return 0;
+    }
+    const { usage, timestamp } = usageData;
+    const now = Date.now();
+    if (now - timestamp > USAGE_WINDOW) {
+        return 0;
+    }
+    return usage;
+}
+
+async function updateUsage(env: Env, ip: string, bytes: number): Promise<void> {
+    const usageData = await env.OA_USAGE.get(ip, { type: "json" }) as UsageData | null;
+    const now = Date.now();
+    let newUsage = bytes;
+    if (usageData) {
+        const { usage, timestamp } = usageData;
+        if (now - timestamp <= USAGE_WINDOW) {
+            newUsage += usage;
+        }
+    }
+    await env.OA_USAGE.put(ip, JSON.stringify({ usage: newUsage, timestamp: now }));
+}
+
 export default {
     async fetch(request: Request, env: Env, ctx: EventContext<any, any, any>): Promise<Response> {
         let cache = caches.default;
@@ -38,6 +73,11 @@ export default {
         if (overallCacheResponse) {
             console.log("Cache matched");
             return overallCacheResponse;
+        }
+
+        const ip = request.headers.get("CF-Connecting-IP");
+        if (!ip) {
+            return new Response("IP address not found", { status: 400 });
         }
 
         const url = new URL(request.url)
@@ -89,6 +129,12 @@ export default {
         const objHeadResp = await env.R2.head(r2objectName);
 
         if (objHeadResp === null) {
+            const currentUsage = await getUsage(env, ip);
+            if (currentUsage >= MAX_USAGE) {
+                console.log(`Download limit exceeded for ${ip}`);
+                return new Response("Download limit exceeded", { status: 429 });
+            }
+
             console.log(`Fetching from S3: s3://${config.s3_bucket}/${s3objectName}`);
 
             const aws = new AwsClient({
@@ -126,6 +172,10 @@ export default {
                 const s3Body = s3Object.body.tee();
                 dataForR2 = s3Body[0];
                 dataForResponse = s3Body[1];
+
+                // Track S3 data usage per IP address
+                const contentLength = parseInt(s3Object.headers.get("content-length") || "0", 10);
+                await updateUsage(env, ip, contentLength);
             }
 
             console.log(`Saving to R2: ${r2objectName}`);

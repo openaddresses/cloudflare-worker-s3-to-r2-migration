@@ -17,3 +17,7 @@ R2_OBJECT_PREFIX = "v2.openaddresses.io"
 [[r2_buckets]]
 binding = 'R2'
 bucket_name = 'openaddresses'
+
+[[kv_namespaces]]
+binding = "OA_USAGE"
+id = "a1f4c7c4e9e9438b9a49d52f5a76c11d"
