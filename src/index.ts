@@ -64,6 +64,27 @@ async function updateUsage(env: Env, ip: string, bytes: number): Promise<void> {
     await env.OA_USAGE.put(ip, JSON.stringify({ usage: newUsage, timestamp: now }));
 }
 
+function sanitizePath(path: string): string {
+    // Remove any control characters and non-ASCII characters
+    let sanitized = path.replace(/[\x00-\x1F\x7F-\xFF]/g, '');
+
+    // Remove any URL-encoded versions of control characters
+    sanitized = sanitized.replace(/%[0-1][0-9A-Fa-f]/g, '');
+
+    // Normalize multiple slashes to a single slash
+    sanitized = sanitized.replace(/\/+/g, '/');
+
+    // Prevent directory traversal attempts
+    sanitized = sanitized.split('/').filter(part => {
+        return part !== '..' && part !== '.';
+    }).join('/');
+
+    // Optional: Only allow specific characters
+    sanitized = sanitized.replace(/[^a-zA-Z0-9_\-\.\/]/g, '');
+
+    return sanitized;
+}
+
 export default {
     async fetch(request: Request, env: Env, ctx: EventContext<any, any, any>): Promise<Response> {
         let cache = caches.default;
@@ -83,6 +104,13 @@ export default {
         const url = new URL(request.url)
         const hostName = url.hostname;
         let s3objectName = url.pathname.slice(1);
+        s3objectName = sanitizePath(s3objectName);
+
+        if (/[\x00-\x1F\x7F-\xFF]/.test(s3objectName) || /%[0-1][0-9A-Fa-f]/.test(s3objectName)) {
+            const resp = new Response(`Invalid request`, { status: 400 });
+            ctx.waitUntil(cache.put(cacheKey, resp.clone()));
+            return resp;
+        }
 
         const config = hostToBucketMapping[hostName];
         if (!config) {
@@ -203,6 +231,7 @@ export default {
         }
 
         if (objHeadResp.customMetadata[amzRedirectLocationHeaderName]) {
+            console.log(`R2 says to redirect to ${objHeadResp.customMetadata[amzRedirectLocationHeaderName]}`);
             const resp = Response.redirect(objHeadResp.customMetadata[amzRedirectLocationHeaderName], 302);
             ctx.waitUntil(cache.put(cacheKey, resp.clone()));
             return resp;
