@@ -38,30 +38,52 @@ const hostToBucketMapping = {
 
 const amzRedirectLocationHeaderName = "x-amz-website-redirect-location";
 
-async function getUsage(env: Env, ip: string): Promise<number> {
-    const usageData = await env.OA_USAGE.get(ip, { type: "json" }) as UsageData | null;
-    if (!usageData) {
-        return 0;
-    }
-    const { usage, timestamp } = usageData;
-    const now = Date.now();
-    if (now - timestamp > USAGE_WINDOW) {
-        return 0;
-    }
-    return usage;
+// Extract client fingerprint from request
+function getClientFingerprint(request: Request): string {
+    const tlsFingerprint = request.cf?.tlsClientExtensionsSha1 || "unknown";
+    const asn = request.cf?.asn || "unknown";
+
+    // Combine TLS fingerprint with ASN for more accurate identification
+    return `${tlsFingerprint}:${asn}`;
 }
 
-async function updateUsage(env: Env, ip: string, bytes: number): Promise<void> {
-    const usageData = await env.OA_USAGE.get(ip, { type: "json" }) as UsageData | null;
+// Track usage by fingerprint
+async function trackFingerprintUsage(env: Env, request: Request, bytes: number): Promise<void> {
+    const fingerprint = getClientFingerprint(request);
+    const fingerprintKey = `fp:${fingerprint}`;
+
+    const usageData = await env.OA_USAGE.get(fingerprintKey, { type: "json" }) as FingerprintData | null;
     const now = Date.now();
     let newUsage = bytes;
+
     if (usageData) {
         const { usage, timestamp } = usageData;
         if (now - timestamp <= USAGE_WINDOW) {
             newUsage += usage;
         }
     }
-    await env.OA_USAGE.put(ip, JSON.stringify({ usage: newUsage, timestamp: now }));
+
+    await env.OA_USAGE.put(fingerprintKey, JSON.stringify({
+        usage: newUsage,
+        timestamp: now
+    }));
+}
+
+// Check if client exceeds limits
+async function checkFingerprintUsage(env: Env, request: Request): Promise<boolean> {
+    const fingerprint = getClientFingerprint(request);
+    const fingerprintKey = `fp:${fingerprint}`;
+
+    const usageData = await env.OA_USAGE.get(fingerprintKey, { type: "json" }) as UsageData | null;
+    if (!usageData) return false;
+
+    const { usage, timestamp } = usageData;
+    const now = Date.now();
+
+    if (now - timestamp > USAGE_WINDOW) return false;
+
+    // If the same TLS fingerprint is downloading a lot across different IPs, it's likely abuse
+    return usage >= MAX_USAGE;
 }
 
 function sanitizePath(path: string): string {
@@ -113,16 +135,6 @@ export default {
             return resp;
         }
 
-        // Require a referer header for requests to data.openaddresses.io/runs
-        const referer = request.headers.get("referer");
-        if (hostName === "data.openaddresses.io" && s3objectName.startsWith("runs/") && !referer) {
-            const resp = new Response(`Invalid request`, {
-                status: 403
-            });
-            ctx.waitUntil(cache.put(cacheKey, resp.clone()));
-            return resp;
-        }
-
         const config = hostToBucketMapping[hostName];
         if (!config) {
             let resp = new Response(`Unknown host`, {
@@ -168,8 +180,8 @@ export default {
         const objHeadResp = await env.R2.head(r2objectName);
 
         if (objHeadResp === null) {
-            const currentUsage = await getUsage(env, ip);
-            if (currentUsage >= MAX_USAGE) {
+            const fingerprintExceedsLimits = await checkFingerprintUsage(env, request);
+            if (fingerprintExceedsLimits) {
                 console.log(`Download limit exceeded for ${ip}`);
                 return new Response("Download limit exceeded", { status: 429 });
             }
