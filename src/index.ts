@@ -1,15 +1,18 @@
-import { AwsClient } from "aws4fetch";
+import { Hono } from 'hono';
+import { cache } from 'hono/cache';
+import { AwsClient } from 'aws4fetch';
 
+// Define environment interface
 interface Env {
-    R2: R2Bucket,
-    R2_OBJECT_PREFIX: string,
-    OA_USAGE: KVNamespace,
-    AWS_ACCESS_KEY_ID: string,
-    AWS_SECRET_ACCESS_KEY: string,
-    AWS_SERVICE: string,
-    AWS_DEFAULT_REGION: string,
-    AWS_S3_BUCKET: string
-    AWS_S3_BUCKET_SCHEME: string
+    R2: R2Bucket;
+    R2_OBJECT_PREFIX: string;
+    OA_USAGE: KVNamespace;
+    AWS_ACCESS_KEY_ID: string;
+    AWS_SECRET_ACCESS_KEY: string;
+    AWS_SERVICE: string;
+    AWS_DEFAULT_REGION: string;
+    AWS_S3_BUCKET: string;
+    AWS_S3_BUCKET_SCHEME: string;
 }
 
 interface UsageData {
@@ -21,27 +24,28 @@ const MAX_USAGE = 5 * 1024 * 1024 * 1024; // 5 GB
 const USAGE_WINDOW = 24 * 60 * 60 * 1000; // 24 hours
 
 const hostToBucketMapping = {
-    "v2.openaddresses.io": {
-        "s3_bucket": "v2.openaddresses.io",
-        "block_root": true,
+    'v2.openaddresses.io': {
+        s3_bucket: 'v2.openaddresses.io',
+        block_root: true,
     },
-    "results.openaddresses.io": {
-        "s3_bucket": "results.openaddresses.io",
-        "index_file": "index.html",
-        "cache_control": "public, max-age=604800, immutable",
+    'results.openaddresses.io': {
+        s3_bucket: 'results.openaddresses.io',
+        index_file: 'index.html',
+        cache_control: 'public, max-age=604800, immutable',
     },
-    "data.openaddresses.io": {
-        "s3_bucket": "data.openaddresses.io",
-        "block_root": true,
-    }
-}
+    'data.openaddresses.io': {
+        s3_bucket: 'data.openaddresses.io',
+        block_root: true,
+    },
+};
 
-const amzRedirectLocationHeaderName = "x-amz-website-redirect-location";
+const amzRedirectLocationHeaderName = 'x-amz-website-redirect-location';
 
 // Extract client fingerprint from request
 function getClientFingerprint(request: Request): string {
-    const tlsFingerprint = request.cf?.tlsClientExtensionsSha1 || "unknown";
-    const asn = request.cf?.asn || "unknown";
+    const cf = request.cf as any;
+    const tlsFingerprint = cf?.tlsClientExtensionsSha1 || 'unknown';
+    const asn = cf?.asn || 'unknown';
 
     // Combine TLS fingerprint with ASN for more accurate identification
     return `${tlsFingerprint}:${asn}`;
@@ -52,7 +56,7 @@ async function trackFingerprintUsage(env: Env, request: Request, bytes: number):
     const fingerprint = getClientFingerprint(request);
     const fingerprintKey = `fp:${fingerprint}`;
 
-    const usageData = await env.OA_USAGE.get(fingerprintKey, { type: "json" }) as FingerprintData | null;
+    const usageData = await env.OA_USAGE.get(fingerprintKey, { type: 'json' }) as UsageData | null;
     const now = Date.now();
     let newUsage = bytes;
 
@@ -63,10 +67,13 @@ async function trackFingerprintUsage(env: Env, request: Request, bytes: number):
         }
     }
 
-    await env.OA_USAGE.put(fingerprintKey, JSON.stringify({
-        usage: newUsage,
-        timestamp: now
-    }));
+    await env.OA_USAGE.put(
+        fingerprintKey,
+        JSON.stringify({
+            usage: newUsage,
+            timestamp: now,
+        })
+    );
 }
 
 // Check if client exceeds limits
@@ -74,7 +81,7 @@ async function checkFingerprintUsage(env: Env, request: Request): Promise<boolea
     const fingerprint = getClientFingerprint(request);
     const fingerprintKey = `fp:${fingerprint}`;
 
-    const usageData = await env.OA_USAGE.get(fingerprintKey, { type: "json" }) as UsageData | null;
+    const usageData = await env.OA_USAGE.get(fingerprintKey, { type: 'json' }) as UsageData | null;
     if (!usageData) return false;
 
     const { usage, timestamp } = usageData;
@@ -84,6 +91,11 @@ async function checkFingerprintUsage(env: Env, request: Request): Promise<boolea
 
     // If the same TLS fingerprint is downloading a lot across different IPs, it's likely abuse
     return usage >= MAX_USAGE;
+}
+
+// Update usage for tracking
+async function updateUsage(env: Env, ip: string, bytes: number): Promise<void> {
+    await trackFingerprintUsage(env, ip as unknown as Request, bytes);
 }
 
 function sanitizePath(path: string): string {
@@ -97,9 +109,12 @@ function sanitizePath(path: string): string {
     sanitized = sanitized.replace(/\/+/g, '/');
 
     // Prevent directory traversal attempts
-    sanitized = sanitized.split('/').filter(part => {
-        return part !== '..' && part !== '.';
-    }).join('/');
+    sanitized = sanitized
+        .split('/')
+        .filter((part) => {
+            return part !== '..' && part !== '.';
+        })
+        .join('/');
 
     // Optional: Only allow specific characters
     sanitized = sanitized.replace(/[^a-zA-Z0-9_\-\.\/]/g, '');
@@ -107,183 +122,186 @@ function sanitizePath(path: string): string {
     return sanitized;
 }
 
-export default {
-    async fetch(request: Request, env: Env, ctx: EventContext<any, any, any>): Promise<Response> {
-        let cache = caches.default;
-        const cacheUrl = new URL(request.url);
-        const cacheKey = new Request(cacheUrl.toString(), request);
-        let overallCacheResponse = await cache.match(cacheKey);
-        if (overallCacheResponse) {
-            console.log("Cache matched");
-            return overallCacheResponse;
-        }
+// Create Hono app
+const app = new Hono<{ Bindings: Env }>();
 
-        const ip = request.headers.get("CF-Connecting-IP");
-        if (!ip) {
-            return new Response("IP address not found", { status: 400 });
-        }
+// Global middleware
+app.use(async (c, next) => {
+    const ip = c.req.header('CF-Connecting-IP');
+    if (!ip) {
+        return c.text('IP address not found', 400);
+    }
 
-        const url = new URL(request.url)
-        const hostName = url.hostname;
-        let s3objectName = url.pathname.slice(1);
-        s3objectName = sanitizePath(s3objectName);
+    await next();
+});
 
-        // Block requests with control characters or non-ASCII characters
-        if (/[\x00-\x1F\x7F-\xFF]/.test(s3objectName) || /%[0-1][0-9A-Fa-f]/.test(s3objectName)) {
-            const resp = new Response(`Invalid request`, { status: 400 });
-            ctx.waitUntil(cache.put(cacheKey, resp.clone()));
-            return resp;
-        }
+// Cache middleware
+app.use('*', cache({
+    cacheName: 'default',
+    cacheControl: 'public, max-age=3600',
+}));
 
-        // Require a referer header for requests to data.openaddresses.io/runs
-        const referer = request.headers.get("referer");
-        if (hostName === "data.openaddresses.io" && s3objectName.startsWith("runs/") && !referer) {
-            const resp = new Response(`Invalid request`, {
-                status: 403
-            });
-            ctx.waitUntil(cache.put(cacheKey, resp.clone()));
-            return resp;
-        }
+// Main handler
+app.get('*', async (c) => {
+    const { req, env } = c;
+    const cache = caches.default;
+    const cacheKey = new Request(req.url, req);
+    const overallCacheResponse = await cache.match(cacheKey);
 
-        const config = hostToBucketMapping[hostName];
-        if (!config) {
-            let resp = new Response(`Unknown host`, {
-                status: 404
-            });
-            ctx.waitUntil(cache.put(cacheKey, resp.clone()));
-            return resp;
-        }
+    if (overallCacheResponse) {
+        console.log('Cache matched');
+        return overallCacheResponse;
+    }
 
-        if (s3objectName == "" || s3objectName.endsWith("/")) {
-            if (config.block_root) {
-                const resp = new Response(`Bad Request`, {
-                    status: 400
-                });
-                ctx.waitUntil(cache.put(cacheKey, resp.clone()));
-                return resp;
-            }
+    const url = new URL(req.url);
+    const hostName = url.hostname;
+    let s3objectName = url.pathname.slice(1);
+    s3objectName = sanitizePath(s3objectName);
 
-            if (config.index_file && (s3objectName == "" || s3objectName.endsWith("/"))) {
-                s3objectName += config.index_file;
-            }
-        }
-
-        const r2prefix = config.s3_bucket + "/";
-        const r2objectName =  r2prefix + s3objectName;
-
-        if (r2objectName === '') {
-            const resp = new Response(`Bad Request`, {
-                status: 400
-            });
-            ctx.waitUntil(cache.put(cacheKey, resp.clone()));
-            return resp;
-        }
-
-        if (request.method !== 'GET') {
-            const resp = new Response(`Method Not Allowed`, {
-                status: 405
-            });
-            ctx.waitUntil(cache.put(cacheKey, resp.clone()));
-            return resp;
-        }
-
-        const objHeadResp = await env.R2.head(r2objectName);
-
-        if (objHeadResp === null) {
-            const fingerprintExceedsLimits = await checkFingerprintUsage(env, request);
-            if (fingerprintExceedsLimits) {
-                console.log(`Download limit exceeded for ${ip}`);
-                return new Response("Download limit exceeded", { status: 429 });
-            }
-
-            console.log(`Fetching from S3: s3://${config.s3_bucket}/${s3objectName}`);
-
-            const aws = new AwsClient({
-                "accessKeyId": env.AWS_ACCESS_KEY_ID,
-                "secretAccessKey": env.AWS_SECRET_ACCESS_KEY,
-                "service": env.AWS_SERVICE,
-                "region": env.AWS_DEFAULT_REGION
-            });
-
-            const requestToSign = new Request(`https://s3.us-east-1.amazonaws.com/${config.s3_bucket}/${s3objectName}`);
-            // requestToSign.headers["host"] = `${config.s3_bucket}.s3.us-east-1.amazonaws.com`;
-            const signedRequest = await aws.sign(requestToSign);
-            const s3Object = await fetch(signedRequest);
-
-            if (s3Object.status === 404) {
-                const resp = new Response(`Object ${s3objectName} not found`, {
-                    status: 404,
-                });
-                ctx.waitUntil(cache.put(cacheKey, resp.clone()));
-                return resp;
-            }
-
-            let dataForR2, dataForResponse;
-
-            const customMetadata = {};
-            const redirectTo = s3Object.headers.get(amzRedirectLocationHeaderName);
-            if (redirectTo) {
-                customMetadata[amzRedirectLocationHeaderName] = redirectTo;
-            }
-
-            if (s3Object.headers.get("content-length") == null) {
-                dataForR2 = await s3Object.text();
-                dataForResponse = dataForR2;
-            } else {
-                const s3Body = s3Object.body.tee();
-                dataForR2 = s3Body[0];
-                dataForResponse = s3Body[1];
-
-                // Track S3 data usage per IP address
-                const contentLength = parseInt(s3Object.headers.get("content-length") || "0", 10);
-                await updateUsage(env, ip, contentLength);
-            }
-
-            console.log(`Saving to R2: ${r2objectName}`);
-
-            ctx.waitUntil(env.R2.put(r2objectName, dataForR2, {
-                httpMetadata: s3Object.headers,
-                customMetadata: customMetadata,
-            }))
-
-            if (redirectTo) {
-                const resp = Response.redirect(redirectTo, 302);
-                ctx.waitUntil(cache.put(cacheKey, resp.clone()));
-                return resp;
-            }
-
-            // Clone the response so that it's no longer immutable
-            const newResponse = new Response(dataForResponse, s3Object);
-            if (config.cache_control) {
-                newResponse.headers.set("cache-control", config.cache_control);
-            }
-
-            ctx.waitUntil(cache.put(cacheKey, newResponse.clone()));
-
-            return newResponse;
-        }
-
-        if (objHeadResp.customMetadata[amzRedirectLocationHeaderName]) {
-            console.log(`R2 says to redirect to ${objHeadResp.customMetadata[amzRedirectLocationHeaderName]}`);
-            const resp = Response.redirect(objHeadResp.customMetadata[amzRedirectLocationHeaderName], 302);
-            ctx.waitUntil(cache.put(cacheKey, resp.clone()));
-            return resp;
-        }
-
-        console.log(`Fetching from R2: ${r2objectName}`);
-
-        const obj = await env.R2.get(r2objectName);
-
-        const headers = new Headers()
-        obj.writeHttpMetadata(headers)
-        if (config.cache_control) {
-            headers.set("cache-control", config.cache_control);
-        }
-        headers.set('etag', obj.httpEtag)
-        const resp = new Response(obj.body, {
-            headers
-        });
-        ctx.waitUntil(cache.put(cacheKey, resp.clone()));
+    // Block requests with control characters or non-ASCII characters
+    if (/[\x00-\x1F\x7F-\xFF]/.test(s3objectName) || /%[0-1][0-9A-Fa-f]/.test(s3objectName)) {
+        const resp = new Response(`Invalid request`, { status: 400 });
+        c.executionCtx.waitUntil(cache.put(cacheKey, resp.clone()));
         return resp;
     }
-}
+
+    // Require a referer header for requests to data.openaddresses.io/runs
+    const referer = req.header('referer');
+    if (hostName === 'data.openaddresses.io' && s3objectName.startsWith('runs/') && !referer) {
+        const resp = new Response(`Invalid request`, { status: 403 });
+        c.executionCtx.waitUntil(cache.put(cacheKey, resp.clone()));
+        return resp;
+    }
+
+    const config = hostToBucketMapping[hostName];
+    if (!config) {
+        const resp = new Response(`Unknown host`, { status: 404 });
+        c.executionCtx.waitUntil(cache.put(cacheKey, resp.clone()));
+        return resp;
+    }
+
+    if (s3objectName == '' || s3objectName.endsWith('/')) {
+        if (config.block_root) {
+            const resp = new Response(`Bad Request`, { status: 400 });
+            c.executionCtx.waitUntil(cache.put(cacheKey, resp.clone()));
+            return resp;
+        }
+
+        if (config.index_file && (s3objectName == '' || s3objectName.endsWith('/'))) {
+            s3objectName += config.index_file;
+        }
+    }
+
+    const r2prefix = config.s3_bucket + '/';
+    const r2objectName = r2prefix + s3objectName;
+
+    if (r2objectName === '') {
+        const resp = new Response(`Bad Request`, { status: 400 });
+        c.executionCtx.waitUntil(cache.put(cacheKey, resp.clone()));
+        return resp;
+    }
+
+    if (req.method !== 'GET') {
+        const resp = new Response(`Method Not Allowed`, { status: 405 });
+        c.executionCtx.waitUntil(cache.put(cacheKey, resp.clone()));
+        return resp;
+    }
+
+    const objHeadResp = await env.R2.head(r2objectName);
+
+    if (objHeadResp === null) {
+        const fingerprintExceedsLimits = await checkFingerprintUsage(env, req);
+        if (fingerprintExceedsLimits) {
+            console.log(`Download limit exceeded for ${req.header('CF-Connecting-IP')}`);
+            return new Response('Download limit exceeded', { status: 429 });
+        }
+
+        console.log(`Fetching from S3: s3://${config.s3_bucket}/${s3objectName}`);
+
+        const aws = new AwsClient({
+            accessKeyId: env.AWS_ACCESS_KEY_ID,
+            secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
+            service: env.AWS_SERVICE,
+            region: env.AWS_DEFAULT_REGION,
+        });
+
+        const requestToSign = new Request(`https://s3.us-east-1.amazonaws.com/${config.s3_bucket}/${s3objectName}`);
+        const signedRequest = await aws.sign(requestToSign);
+        const s3Object = await fetch(signedRequest);
+
+        if (s3Object.status === 404) {
+            const resp = new Response(`Object ${s3objectName} not found`, { status: 404 });
+            c.executionCtx.waitUntil(cache.put(cacheKey, resp.clone()));
+            return resp;
+        }
+
+        let dataForR2, dataForResponse;
+
+        const customMetadata = {};
+        const redirectTo = s3Object.headers.get(amzRedirectLocationHeaderName);
+        if (redirectTo) {
+            customMetadata[amzRedirectLocationHeaderName] = redirectTo;
+        }
+
+        if (s3Object.headers.get('content-length') == null) {
+            dataForR2 = await s3Object.text();
+            dataForResponse = dataForR2;
+        } else {
+            const s3Body = s3Object.body.tee();
+            dataForR2 = s3Body[0];
+            dataForResponse = s3Body[1];
+
+            // Track S3 data usage per IP address
+            const contentLength = parseInt(s3Object.headers.get('content-length') || '0', 10);
+            await updateUsage(env, req.header('CF-Connecting-IP') || 'unknown', contentLength);
+        }
+
+        console.log(`Saving to R2: ${r2objectName}`);
+
+        c.executionCtx.waitUntil(
+            env.R2.put(r2objectName, dataForR2, {
+                httpMetadata: s3Object.headers,
+                customMetadata: customMetadata,
+            })
+        );
+
+        if (redirectTo) {
+            const resp = Response.redirect(redirectTo, 302);
+            c.executionCtx.waitUntil(cache.put(cacheKey, resp.clone()));
+            return resp;
+        }
+
+        // Clone the response so that it's no longer immutable
+        const newResponse = new Response(dataForResponse, s3Object);
+        if (config.cache_control) {
+            newResponse.headers.set('cache-control', config.cache_control);
+        }
+
+        c.executionCtx.waitUntil(cache.put(cacheKey, newResponse.clone()));
+
+        return newResponse;
+    }
+
+    if (objHeadResp.customMetadata[amzRedirectLocationHeaderName]) {
+        console.log(`R2 says to redirect to ${objHeadResp.customMetadata[amzRedirectLocationHeaderName]}`);
+        const resp = Response.redirect(objHeadResp.customMetadata[amzRedirectLocationHeaderName], 302);
+        c.executionCtx.waitUntil(cache.put(cacheKey, resp.clone()));
+        return resp;
+    }
+
+    console.log(`Fetching from R2: ${r2objectName}`);
+
+    const obj = await env.R2.get(r2objectName);
+
+    const headers = new Headers();
+    obj.writeHttpMetadata(headers);
+    if (config.cache_control) {
+        headers.set('cache-control', config.cache_control);
+    }
+    headers.set('etag', obj.httpEtag);
+    const resp = new Response(obj.body, { headers });
+    c.executionCtx.waitUntil(cache.put(cacheKey, resp.clone()));
+    return resp;
+});
+
+export default app;
