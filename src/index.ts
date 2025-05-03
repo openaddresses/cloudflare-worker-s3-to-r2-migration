@@ -43,9 +43,8 @@ const amzRedirectLocationHeaderName = 'x-amz-website-redirect-location';
 
 // Extract client fingerprint from request
 function getClientFingerprint(request: Request): string {
-    const cf = request.cf as any;
-    const tlsFingerprint = cf?.tlsClientExtensionsSha1 || 'unknown';
-    const asn = cf?.asn || 'unknown';
+    const tlsFingerprint = request.cf.tlsClientExtensionsSha1 || 'unknown';
+    const asn = request.cf.asn || 'unknown';
 
     // Combine TLS fingerprint with ASN for more accurate identification
     return `${tlsFingerprint}:${asn}`;
@@ -91,11 +90,6 @@ async function checkFingerprintUsage(env: Env, request: Request): Promise<boolea
 
     // If the same TLS fingerprint is downloading a lot across different IPs, it's likely abuse
     return usage >= MAX_USAGE;
-}
-
-// Update usage for tracking
-async function updateUsage(env: Env, ip: string, bytes: number): Promise<void> {
-    await trackFingerprintUsage(env, ip as unknown as Request, bytes);
 }
 
 function sanitizePath(path: string): string {
@@ -210,7 +204,7 @@ app.get('*', async (c) => {
     const objHeadResp = await env.R2.head(r2objectName);
 
     if (objHeadResp === null) {
-        const fingerprintExceedsLimits = await checkFingerprintUsage(env, req);
+        const fingerprintExceedsLimits = await checkFingerprintUsage(env, req.raw);
         if (fingerprintExceedsLimits) {
             console.log(`Download limit exceeded for ${req.header('CF-Connecting-IP')}`);
             return new Response('Download limit exceeded', { status: 429 });
@@ -253,7 +247,7 @@ app.get('*', async (c) => {
 
             // Track S3 data usage per IP address
             const contentLength = parseInt(s3Object.headers.get('content-length') || '0', 10);
-            await updateUsage(env, req.header('CF-Connecting-IP') || 'unknown', contentLength);
+            await trackFingerprintUsage(env, req.raw, contentLength);
         }
 
         console.log(`Saving to R2: ${r2objectName}`);
