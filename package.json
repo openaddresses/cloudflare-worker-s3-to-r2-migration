@@ -20,11 +20,11 @@
   },
   "dependencies": {
     "aws4fetch": "^1.0.20",
-    "hono": "^4.7.4"
+    "hono": "^4.7.8"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250303.0",
+    "@cloudflare/workers-types": "^4.20250502.0",
     "prettier": "^3.5.3",
-    "wrangler": "^3.112.0"
+    "wrangler": "^4.14.1"
   }
 }
