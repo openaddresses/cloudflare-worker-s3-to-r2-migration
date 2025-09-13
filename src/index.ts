@@ -221,31 +221,21 @@ app.get('*', async (c) => {
             return resp;
         }
 
-        let dataForR2, dataForResponse;
-
         const customMetadata = {};
         const redirectTo = s3Object.headers.get(amzRedirectLocationHeaderName);
         if (redirectTo) {
             customMetadata[amzRedirectLocationHeaderName] = redirectTo;
         }
 
-        if (s3Object.headers.get('content-length') == null) {
-            dataForR2 = await s3Object.text();
-            dataForResponse = dataForR2;
-        } else {
-            const s3Body = s3Object.body.tee();
-            dataForR2 = s3Body[0];
-            dataForResponse = s3Body[1];
-
-            // Track S3 data usage per IP address
-            const contentLength = parseInt(s3Object.headers.get('content-length') || '0', 10);
+        // Track S3 data usage per IP address
+        const contentLength = parseInt(s3Object.headers.get('content-length') || '0', 10);
+        if (contentLength > 0) {
             await trackFingerprintUsage(env, req.raw, contentLength);
         }
 
-        console.log(`Saving to R2: ${r2objectName}`);
-
+        // Save to R2 asynchronously while streaming to client
         c.executionCtx.waitUntil(
-            env.R2.put(r2objectName, dataForR2, {
+            env.R2.put(r2objectName, s3Object.body, {
                 httpMetadata: s3Object.headers,
                 customMetadata: customMetadata,
             })
@@ -257,8 +247,8 @@ app.get('*', async (c) => {
             return resp;
         }
 
-        // Clone the response so that it's no longer immutable
-        const newResponse = new Response(dataForResponse, s3Object);
+        // Stream S3 response directly to client
+        const newResponse = new Response(s3Object.body, s3Object);
         if (config.cache_control) {
             newResponse.headers.set('cache-control', config.cache_control);
         }
