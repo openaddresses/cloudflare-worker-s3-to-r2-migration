@@ -283,6 +283,7 @@ app.get('*', async (c) => {
         return newResponse;
     }
 
+    // If object exists in R2, redirect to its public URL
     if (objHeadResp.customMetadata[amzRedirectLocationHeaderName]) {
         console.log(`R2 says to redirect to ${objHeadResp.customMetadata[amzRedirectLocationHeaderName]}`);
         const resp = Response.redirect(objHeadResp.customMetadata[amzRedirectLocationHeaderName], 302);
@@ -290,17 +291,12 @@ app.get('*', async (c) => {
         return resp;
     }
 
-    console.log(`Fetching from R2: ${r2objectName}`);
-
-    const obj = await env.R2.get(r2objectName);
-
-    const headers = new Headers();
-    obj.writeHttpMetadata(headers);
-    if (config.cache_control) {
-        headers.set('cache-control', config.cache_control);
-    }
-    headers.set('etag', obj.httpEtag);
-    const resp = new Response(obj.body, { headers });
+    // Construct R2 public URL and redirect
+    // Assumes R2 is accessible at https://<R2_PUBLIC_DOMAIN>/<bucket>/<object>
+    const r2PublicDomain = env.R2_OBJECT_PREFIX || 'https://r2.openaddresses.io';
+    const r2Url = `${r2PublicDomain}/${r2objectName}`;
+    console.log(`Redirecting to R2 public URL: ${r2Url}`);
+    const resp = Response.redirect(r2Url, 302);
     c.executionCtx.waitUntil(cache.put(cacheKey, resp.clone()));
     return resp;
 });
