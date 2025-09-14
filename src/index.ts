@@ -211,9 +211,34 @@ app.get('*', async (c) => {
             region: env.AWS_DEFAULT_REGION,
         });
 
-        const requestToSign = new Request(`https://s3.us-east-1.amazonaws.com/${config.s3_bucket}/${s3objectName}`);
-        const signedRequest = await aws.sign(requestToSign);
-        const s3Object = await fetch(signedRequest);
+        // Set up AbortController for 20s timeout
+        const abortController = new AbortController();
+        const timeoutId = setTimeout(() => abortController.abort(), 20000);
+
+        // Add custom User-Agent header
+        const requestToSign = new Request(
+            `https://s3.us-east-1.amazonaws.com/${config.s3_bucket}/${s3objectName}`,
+            {
+                headers: {
+                    'User-Agent': 'OpenAddresses-Cloudflare-Worker/1.0',
+                },
+                signal: abortController.signal,
+            }
+        );
+        let s3Object;
+        try {
+            const signedRequest = await aws.sign(requestToSign);
+            s3Object = await fetch(signedRequest);
+        } catch (err) {
+            if (err.name === 'AbortError') {
+                const resp = new Response(`Upstream S3 fetch timed out after 20s`, { status: 504 });
+                c.executionCtx.waitUntil(cache.put(cacheKey, resp.clone()));
+                return resp;
+            }
+            throw err;
+        } finally {
+            clearTimeout(timeoutId);
+        }
 
         if (s3Object.status === 404) {
             const resp = new Response(`Object ${s3objectName} not found`, { status: 404 });
