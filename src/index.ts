@@ -292,9 +292,12 @@ app.get('*', async (c) => {
             await trackFingerprintUsage(env, req.raw, contentLength);
         }
 
+        // Split the stream into two - one for R2 storage, one for client response
+        const [streamForR2, streamForClient] = s3Object.body.tee();
+
         // Save to R2 asynchronously while streaming to client
         c.executionCtx.waitUntil(
-            env.R2.put(r2objectName, s3Object.body, {
+            env.R2.put(r2objectName, streamForR2, {
                 httpMetadata: s3Object.headers,
                 customMetadata: customMetadata,
             })
@@ -306,8 +309,8 @@ app.get('*', async (c) => {
             return resp;
         }
 
-        // Stream S3 response directly to client
-        const newResponse = new Response(s3Object.body, s3Object);
+        // Stream S3 response directly to client using the second stream
+        const newResponse = new Response(streamForClient, s3Object);
         if (config.cache_control) {
             newResponse.headers.set('cache-control', config.cache_control);
         }
