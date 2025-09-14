@@ -13,6 +13,11 @@ interface Env {
     AWS_DEFAULT_REGION: string;
     AWS_S3_BUCKET: string;
     AWS_S3_BUCKET_SCHEME: string;
+    // R2 credentials for presigned URLs
+    R2_ACCESS_KEY_ID: string;
+    R2_SECRET_ACCESS_KEY: string;
+    R2_ENDPOINT: string;
+    R2_BUCKET_NAME: string;
 }
 
 interface UsageData {
@@ -114,6 +119,33 @@ function sanitizePath(path: string): string {
     sanitized = sanitized.replace(/[^a-zA-Z0-9_\-\.\/]/g, '');
 
     return sanitized;
+}
+
+// Generate presigned URL for R2 object
+async function generateR2PresignedUrl(env: Env, objectName: string): Promise<string> {
+    const aws = new AwsClient({
+        accessKeyId: env.R2_ACCESS_KEY_ID,
+        secretAccessKey: env.R2_SECRET_ACCESS_KEY,
+        service: 's3',
+        region: 'auto',
+    });
+
+    // Create a GET request for the R2 object with query parameters for presigned URL
+    const expiresIn = 2 * 60 * 60; // 2 hours in seconds
+
+    const url = new URL(`${env.R2_ENDPOINT}/${env.R2_BUCKET_NAME}/${objectName}`);
+    url.searchParams.set('X-Amz-Expires', expiresIn.toString());
+    url.searchParams.set('X-Amz-Algorithm', 'AWS4-HMAC-SHA256');
+    url.searchParams.set('X-Amz-Date', new Date().toISOString().replace(/[:\-]|\.\d{3}/g, ''));
+
+    const request = new Request(url.toString(), {
+        method: 'GET',
+    });
+
+    // Sign the request
+    const signedRequest = await aws.sign(request);
+
+    return signedRequest.url;
 }
 
 // Create Hono app
@@ -283,7 +315,7 @@ app.get('*', async (c) => {
         return newResponse;
     }
 
-    // If object exists in R2, redirect to its public URL
+    // If object exists in R2, handle redirects first
     if (objHeadResp.customMetadata[amzRedirectLocationHeaderName]) {
         console.log(`R2 says to redirect to ${objHeadResp.customMetadata[amzRedirectLocationHeaderName]}`);
         const resp = Response.redirect(objHeadResp.customMetadata[amzRedirectLocationHeaderName], 302);
@@ -291,14 +323,19 @@ app.get('*', async (c) => {
         return resp;
     }
 
-    // Construct R2 public URL and redirect
-    // Assumes R2 is accessible at https://<R2_PUBLIC_DOMAIN>/<bucket>/<object>
-    const r2PublicDomain = env.R2_OBJECT_PREFIX || 'https://r2.openaddresses.io';
-    const r2Url = `${r2PublicDomain}/${r2objectName}`;
-    console.log(`Redirecting to R2 public URL: ${r2Url}`);
-    const resp = Response.redirect(r2Url, 302);
-    c.executionCtx.waitUntil(cache.put(cacheKey, resp.clone()));
-    return resp;
+    // Generate presigned URL for R2 object and redirect
+    try {
+        const presignedUrl = await generateR2PresignedUrl(env, r2objectName);
+        console.log(`Redirecting to R2 presigned URL for object: ${r2objectName}`);
+        const resp = Response.redirect(presignedUrl, 302);
+        c.executionCtx.waitUntil(cache.put(cacheKey, resp.clone()));
+        return resp;
+    } catch (error) {
+        console.error(`Failed to generate presigned URL for ${r2objectName}:`, error);
+        const resp = new Response('Failed to generate access URL', { status: 500 });
+        c.executionCtx.waitUntil(cache.put(cacheKey, resp.clone()));
+        return resp;
+    }
 });
 
 export default app;

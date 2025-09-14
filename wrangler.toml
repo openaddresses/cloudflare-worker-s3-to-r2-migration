@@ -18,6 +18,7 @@ AWS_SERVICE = "s3"
 AWS_S3_BUCKET_SCHEME = 'https:'
 AWS_S3_BUCKET = "v2.openaddresses.io"
 R2_OBJECT_PREFIX = "v2.openaddresses.io"
+R2_BUCKET_NAME = "openaddresses"
 
 [[r2_buckets]]
 binding = 'R2'
