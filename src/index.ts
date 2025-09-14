@@ -123,27 +123,29 @@ function sanitizePath(path: string): string {
 
 // Generate presigned URL for R2 object
 async function generateR2PresignedUrl(env: Env, objectName: string): Promise<string> {
-    const aws = new AwsClient({
+    // Create AWS client for R2 with proper credentials
+    const r2 = new AwsClient({
         accessKeyId: env.R2_ACCESS_KEY_ID,
         secretAccessKey: env.R2_SECRET_ACCESS_KEY,
         service: 's3',
         region: 'auto',
     });
 
-    // Create a GET request for the R2 object with query parameters for presigned URL
-    const expiresIn = 2 * 60 * 60; // 2 hours in seconds
+    // Build the URL with X-Amz-Expires query parameter
+    const baseUrl = `${env.R2_ENDPOINT}/${env.R2_BUCKET_NAME}/${objectName}`;
+    const presignedUrl = `${baseUrl}?X-Amz-Expires=7200`; // 2 hours = 7200 seconds
 
-    const url = new URL(`${env.R2_ENDPOINT}/${env.R2_BUCKET_NAME}/${objectName}`);
-    url.searchParams.set('X-Amz-Expires', expiresIn.toString());
-    url.searchParams.set('X-Amz-Algorithm', 'AWS4-HMAC-SHA256');
-    url.searchParams.set('X-Amz-Date', new Date().toISOString().replace(/[:\-]|\.\d{3}/g, ''));
+    console.log(`Generating presigned URL for R2 object: ${baseUrl}`);
 
-    const request = new Request(url.toString(), {
+    // Create request with X-Amz-Expires query parameter
+    const request = new Request(presignedUrl, {
         method: 'GET',
     });
 
-    // Sign the request
-    const signedRequest = await aws.sign(request);
+    // Sign the request with signQuery: true to put signature in query params
+    const signedRequest = await r2.sign(request, {
+        aws: { signQuery: true },
+    });
 
     return signedRequest.url;
 }
